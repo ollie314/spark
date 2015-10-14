@@ -19,12 +19,12 @@ package org.apache.spark.util.collection
 
 import scala.collection.mutable.ArrayBuffer
 
-import org.scalatest.FunSuite
-
 import org.apache.spark._
 import org.apache.spark.io.CompressionCodec
 
-class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
+// TODO: some of these spilling tests probably aren't actually spilling (SPARK-11078)
+
+class ExternalAppendOnlyMapSuite extends SparkFunSuite with LocalSparkContext {
   private val allCompressionCodecs = CompressionCodec.ALL_COMPRESSION_CODECS
   private def createCombiner[T](i: T) = ArrayBuffer[T](i)
   private def mergeValue[T](buffer: ArrayBuffer[T], i: T): ArrayBuffer[T] = buffer += i
@@ -185,7 +185,7 @@ class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
 
     // reduceByKey
     val rdd = sc.parallelize(1 to 10).map(i => (i%2, 1))
-    val result1 = rdd.reduceByKey(_+_).collect()
+    val result1 = rdd.reduceByKey(_ + _).collect()
     assert(result1.toSet === Set[(Int, Int)]((0, 5), (1, 5)))
 
     // groupByKey
@@ -245,8 +245,7 @@ class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
    */
   private def testSimpleSpilling(codec: Option[String] = None): Unit = {
     val conf = createSparkConf(loadDefaults = true, codec)  // Load defaults for Spark home
-    conf.set("spark.shuffle.memoryFraction", "0.001")
-    sc = new SparkContext("local-cluster[1,1,512]", "test", conf)
+    sc = new SparkContext("local-cluster[1,1,1024]", "test", conf)
 
     // reduceByKey - should spill ~8 times
     val rddA = sc.parallelize(0 until 100000).map(i => (i/2, i))
@@ -293,8 +292,7 @@ class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
 
   test("spilling with hash collisions") {
     val conf = createSparkConf(loadDefaults = true)
-    conf.set("spark.shuffle.memoryFraction", "0.001")
-    sc = new SparkContext("local-cluster[1,1,512]", "test", conf)
+    sc = new SparkContext("local-cluster[1,1,1024]", "test", conf)
     val map = createExternalMap[String]
 
     val collisionPairs = Seq(
@@ -342,8 +340,7 @@ class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
 
   test("spilling with many hash collisions") {
     val conf = createSparkConf(loadDefaults = true)
-    conf.set("spark.shuffle.memoryFraction", "0.0001")
-    sc = new SparkContext("local-cluster[1,1,512]", "test", conf)
+    sc = new SparkContext("local-cluster[1,1,1024]", "test", conf)
     val map = new ExternalAppendOnlyMap[FixedHashObject, Int, Int](_ => 1, _ + _, _ + _)
 
     // Insert 10 copies each of lots of objects whose hash codes are either 0 or 1. This causes
@@ -367,8 +364,7 @@ class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
 
   test("spilling with hash collisions using the Int.MaxValue key") {
     val conf = createSparkConf(loadDefaults = true)
-    conf.set("spark.shuffle.memoryFraction", "0.001")
-    sc = new SparkContext("local-cluster[1,1,512]", "test", conf)
+    sc = new SparkContext("local-cluster[1,1,1024]", "test", conf)
     val map = createExternalMap[Int]
 
     (1 to 100000).foreach { i => map.insert(i, i) }
@@ -384,8 +380,7 @@ class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
 
   test("spilling with null keys and values") {
     val conf = createSparkConf(loadDefaults = true)
-    conf.set("spark.shuffle.memoryFraction", "0.001")
-    sc = new SparkContext("local-cluster[1,1,512]", "test", conf)
+    sc = new SparkContext("local-cluster[1,1,1024]", "test", conf)
     val map = createExternalMap[Int]
 
     map.insertAll((1 to 100000).iterator.map(i => (i, i)))
@@ -399,6 +394,21 @@ class ExternalAppendOnlyMapSuite extends FunSuite with LocalSparkContext {
       it.next()
     }
     sc.stop()
+  }
+
+  test("external aggregation updates peak execution memory") {
+    val conf = createSparkConf(loadDefaults = false)
+      .set("spark.shuffle.manager", "hash") // make sure we're not also using ExternalSorter
+      .set("spark.testing.memory", (10 * 1024 * 1024).toString)
+    sc = new SparkContext("local", "test", conf)
+    // No spilling
+    AccumulatorSuite.verifyPeakExecutionMemorySet(sc, "external map without spilling") {
+      sc.parallelize(1 to 10, 2).map { i => (i, i) }.reduceByKey(_ + _).count()
+    }
+    // With spilling
+    AccumulatorSuite.verifyPeakExecutionMemorySet(sc, "external map with spilling") {
+      sc.parallelize(1 to 1000 * 1000, 2).map { i => (i, i) }.reduceByKey(_ + _).count()
+    }
   }
 
 }

@@ -46,7 +46,7 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected () extends Serializab
    * @note vertex ids are unique.
    * @return an RDD containing the vertices in this graph
    */
-  @transient val vertices: VertexRDD[VD]
+  val vertices: VertexRDD[VD]
 
   /**
    * An RDD containing the edges and their associated attributes.  The entries in the RDD contain
@@ -55,11 +55,11 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected () extends Serializab
    * @return an RDD containing the edges in this graph
    *
    * @see [[Edge]] for the edge type.
-   * @see [[triplets]] to get an RDD which contains all the edges
+   * @see [[Graph#triplets]] to get an RDD which contains all the edges
    * along with their vertex data.
    *
    */
-  @transient val edges: EdgeRDD[ED]
+  val edges: EdgeRDD[ED]
 
   /**
    * An RDD containing the edge triplets, which are edges along with the vertex data associated with
@@ -77,7 +77,7 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected () extends Serializab
    * val numInvalid = graph.triplets.map(e => if (e.src.data == e.dst.data) 1 else 0).sum
    * }}}
    */
-  @transient val triplets: RDD[EdgeTriplet[VD, ED]]
+  val triplets: RDD[EdgeTriplet[VD, ED]]
 
   /**
    * Caches the vertices and edges associated with this graph at the specified storage level,
@@ -103,6 +103,18 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected () extends Serializab
    * memory, otherwise saving it on a file will require recomputation.
    */
   def checkpoint(): Unit
+
+  /**
+   * Return whether this Graph has been checkpointed or not.
+   * This returns true iff both the vertices RDD and edges RDD have been checkpointed.
+   */
+  def isCheckpointed: Boolean
+
+  /**
+   * Gets the name of the files to which this Graph was checkpointed.
+   * (The vertices RDD and edges RDD are checkpointed separately.)
+   */
+  def getCheckpointFiles: Seq[String]
 
   /**
    * Uncaches both vertices and edges of this graph. This is useful in iterative algorithms that
@@ -304,7 +316,7 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected () extends Serializab
    * satisfy the predicates
    */
   def subgraph(
-      epred: EdgeTriplet[VD,ED] => Boolean = (x => true),
+      epred: EdgeTriplet[VD, ED] => Boolean = (x => true),
       vpred: (VertexId, VD) => Boolean = ((v, d) => true))
     : Graph[VD, ED]
 
@@ -397,7 +409,7 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected () extends Serializab
    * {{{
    * val rawGraph: Graph[_, _] = Graph.textFile("twittergraph")
    * val inDeg: RDD[(VertexId, Int)] =
-   *   aggregateMessages[Int](ctx => ctx.sendToDst(1), _ + _)
+   *   rawGraph.aggregateMessages[Int](ctx => ctx.sendToDst(1), _ + _)
    * }}}
    *
    * @note By expressing computation at the edge level we achieve

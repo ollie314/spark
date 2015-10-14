@@ -17,32 +17,36 @@
 
 package org.apache.spark.deploy.yarn
 
-import java.lang.{Boolean => JBoolean}
 import java.io.File
-import java.util.{Collections, Set => JSet}
 import java.util.regex.Matcher
 import java.util.regex.Pattern
-import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.mutable.HashMap
+import scala.util.Try
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.Text
-import org.apache.hadoop.mapred.JobConf
+import org.apache.hadoop.mapred.{Master, JobConf}
 import org.apache.hadoop.security.Credentials
 import org.apache.hadoop.security.UserGroupInformation
 import org.apache.hadoop.yarn.conf.YarnConfiguration
-import org.apache.hadoop.yarn.api.records.{Priority, ApplicationAccessType}
-import org.apache.hadoop.yarn.util.RackResolver
-import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.yarn.api.ApplicationConstants
+import org.apache.hadoop.yarn.api.ApplicationConstants.Environment
+import org.apache.hadoop.yarn.api.records.{ApplicationAccessType, ContainerId, Priority}
+import org.apache.hadoop.yarn.util.ConverterUtils
 
-import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.launcher.YarnCommandBuilderUtils
+import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.util.Utils
 
 /**
  * Contains util methods to interact with Hadoop from spark.
  */
 class YarnSparkHadoopUtil extends SparkHadoopUtil {
+
+  private var tokenRenewer: Option[ExecutorDelegationTokenUpdater] = None
 
   override def transferCredentials(source: UserGroupInformation, dest: UserGroupInformation) {
     dest.addCredentials(source.getCredentials())
@@ -83,14 +87,69 @@ class YarnSparkHadoopUtil extends SparkHadoopUtil {
     if (credentials != null) credentials.getSecretKey(new Text(key)) else null
   }
 
+  /**
+   * Get the list of namenodes the user may access.
+   */
+  def getNameNodesToAccess(sparkConf: SparkConf): Set[Path] = {
+    sparkConf.get("spark.yarn.access.namenodes", "")
+      .split(",")
+      .map(_.trim())
+      .filter(!_.isEmpty)
+      .map(new Path(_))
+      .toSet
+  }
+
+  def getTokenRenewer(conf: Configuration): String = {
+    val delegTokenRenewer = Master.getMasterPrincipal(conf)
+    logDebug("delegation token renewer is: " + delegTokenRenewer)
+    if (delegTokenRenewer == null || delegTokenRenewer.length() == 0) {
+      val errorMessage = "Can't get Master Kerberos principal for use as renewer"
+      logError(errorMessage)
+      throw new SparkException(errorMessage)
+    }
+    delegTokenRenewer
+  }
+
+  /**
+   * Obtains tokens for the namenodes passed in and adds them to the credentials.
+   */
+  def obtainTokensForNamenodes(
+    paths: Set[Path],
+    conf: Configuration,
+    creds: Credentials,
+    renewer: Option[String] = None
+  ): Unit = {
+    if (UserGroupInformation.isSecurityEnabled()) {
+      val delegTokenRenewer = renewer.getOrElse(getTokenRenewer(conf))
+      paths.foreach { dst =>
+        val dstFs = dst.getFileSystem(conf)
+        logInfo("getting token for namenode: " + dst)
+        dstFs.addDelegationTokens(delegTokenRenewer, creds)
+      }
+    }
+  }
+
+  private[spark] override def startExecutorDelegationTokenRenewer(sparkConf: SparkConf): Unit = {
+    tokenRenewer = Some(new ExecutorDelegationTokenUpdater(sparkConf, conf))
+    tokenRenewer.get.updateCredentialsIfRequired()
+  }
+
+  private[spark] override def stopExecutorDelegationTokenRenewer(): Unit = {
+    tokenRenewer.foreach(_.stop())
+  }
+
+  private[spark] def getContainerId: ContainerId = {
+    val containerIdString = System.getenv(ApplicationConstants.Environment.CONTAINER_ID.name())
+    ConverterUtils.toContainerId(containerIdString)
+  }
 }
 
 object YarnSparkHadoopUtil {
-  // Additional memory overhead 
-  // 7% was arrived at experimentally. In the interest of minimizing memory waste while covering
-  // the common cases. Memory overhead tends to grow with container size. 
+  // Additional memory overhead
+  // 10% was arrived at experimentally. In the interest of minimizing memory waste while covering
+  // the common cases. Memory overhead tends to grow with container size.
 
-  val MEMORY_OVERHEAD_FACTOR = 0.07
+  val MEMORY_OVERHEAD_FACTOR = 0.10
   val MEMORY_OVERHEAD_MIN = 384
 
   val ANY_HOST = "*"
@@ -101,12 +160,20 @@ object YarnSparkHadoopUtil {
   // request types (like map/reduce in hadoop for example)
   val RM_REQUEST_PRIORITY = Priority.newInstance(1)
 
+  def get: YarnSparkHadoopUtil = {
+    val yarnMode = java.lang.Boolean.valueOf(
+      System.getProperty("SPARK_YARN_MODE", System.getenv("SPARK_YARN_MODE")))
+    if (!yarnMode) {
+      throw new SparkException("YarnSparkHadoopUtil is not available in non-YARN mode!")
+    }
+    SparkHadoopUtil.get.asInstanceOf[YarnSparkHadoopUtil]
+  }
   /**
    * Add a path variable to the given environment map.
    * If the map already contains this key, append the value to the existing value instead.
    */
   def addPathToEnvironment(env: HashMap[String, String], key: String, value: String): Unit = {
-    val newValue = if (env.contains(key)) { env(key) + File.pathSeparator + value } else value
+    val newValue = if (env.contains(key)) { env(key) + getClassPathSeparator  + value } else value
     env.put(key, newValue)
   }
 
@@ -154,25 +221,60 @@ object YarnSparkHadoopUtil {
   }
 
   /**
+   * The handler if an OOM Exception is thrown by the JVM must be configured on Windows
+   * differently: the 'taskkill' command should be used, whereas Unix-based systems use 'kill'.
+   *
+   * As the JVM interprets both %p and %%p as the same, we can use either of them. However,
+   * some tests on Windows computers suggest, that the JVM only accepts '%%p'.
+   *
+   * Furthermore, the behavior of the character '%' on the Windows command line differs from
+   * the behavior of '%' in a .cmd file: it gets interpreted as an incomplete environment
+   * variable. Windows .cmd files escape a '%' by '%%'. Thus, the correct way of writing
+   * '%%p' in an escaped way is '%%%%p'.
+   *
+   * @return The correct OOM Error handler JVM option, platform dependent.
+   */
+  def getOutOfMemoryErrorArgument : String = {
+    if (Utils.isWindows) {
+      escapeForShell("-XX:OnOutOfMemoryError=taskkill /F /PID %%%%p")
+    } else {
+      "-XX:OnOutOfMemoryError='kill %p'"
+    }
+  }
+
+  /**
    * Escapes a string for inclusion in a command line executed by Yarn. Yarn executes commands
-   * using `bash -c "command arg1 arg2"` and that means plain quoting doesn't really work. The
-   * argument is enclosed in single quotes and some key characters are escaped.
+   * using either
+   *
+   * (Unix-based) `bash -c "command arg1 arg2"` and that means plain quoting doesn't really work.
+   * The argument is enclosed in single quotes and some key characters are escaped.
+   *
+   * (Windows-based) part of a .cmd file in which case windows escaping for each argument must be
+   * applied. Windows is quite lenient, however it is usually Java that causes trouble, needing to
+   * distinguish between arguments starting with '-' and class names. If arguments are surrounded
+   * by ' java takes the following string as is, hence an argument is mistakenly taken as a class
+   * name which happens to start with a '-'. The way to avoid this, is to surround nothing with
+   * a ', but instead with a ".
    *
    * @param arg A single argument.
    * @return Argument quoted for execution via Yarn's generated shell script.
    */
   def escapeForShell(arg: String): String = {
     if (arg != null) {
-      val escaped = new StringBuilder("'")
-      for (i <- 0 to arg.length() - 1) {
-        arg.charAt(i) match {
-          case '$' => escaped.append("\\$")
-          case '"' => escaped.append("\\\"")
-          case '\'' => escaped.append("'\\''")
-          case c => escaped.append(c)
+      if (Utils.isWindows) {
+        YarnCommandBuilderUtils.quoteForBatchScript(arg)
+      } else {
+        val escaped = new StringBuilder("'")
+        for (i <- 0 to arg.length() - 1) {
+          arg.charAt(i) match {
+            case '$' => escaped.append("\\$")
+            case '"' => escaped.append("\\\"")
+            case '\'' => escaped.append("'\\''")
+            case c => escaped.append(c)
+          }
         }
+        escaped.append("'").toString()
       }
-      escaped.append("'").toString()
     } else {
       arg
     }
@@ -186,4 +288,54 @@ object YarnSparkHadoopUtil {
     )
   }
 
+  /**
+   * Expand environment variable using Yarn API.
+   * If environment.$$() is implemented, return the result of it.
+   * Otherwise, return the result of environment.$()
+   * Note: $$() is added in Hadoop 2.4.
+   */
+  private lazy val expandMethod =
+    Try(classOf[Environment].getMethod("$$"))
+      .getOrElse(classOf[Environment].getMethod("$"))
+
+  def expandEnvironment(environment: Environment): String =
+    expandMethod.invoke(environment).asInstanceOf[String]
+
+  /**
+   * Get class path separator using Yarn API.
+   * If ApplicationConstants.CLASS_PATH_SEPARATOR is implemented, return it.
+   * Otherwise, return File.pathSeparator
+   * Note: CLASS_PATH_SEPARATOR is added in Hadoop 2.4.
+   */
+  private lazy val classPathSeparatorField =
+    Try(classOf[ApplicationConstants].getField("CLASS_PATH_SEPARATOR"))
+      .getOrElse(classOf[File].getField("pathSeparator"))
+
+  def getClassPathSeparator(): String = {
+    classPathSeparatorField.get(null).asInstanceOf[String]
+  }
+
+  /**
+   * Getting the initial target number of executors depends on whether dynamic allocation is
+   * enabled.
+   */
+  def getInitialTargetExecutorNumber(conf: SparkConf): Int = {
+    if (Utils.isDynamicAllocationEnabled(conf)) {
+      val minNumExecutors = conf.getInt("spark.dynamicAllocation.minExecutors", 0)
+      val initialNumExecutors =
+        conf.getInt("spark.dynamicAllocation.initialExecutors", minNumExecutors)
+      val maxNumExecutors = conf.getInt("spark.dynamicAllocation.maxExecutors", Int.MaxValue)
+      require(initialNumExecutors >= minNumExecutors && initialNumExecutors <= maxNumExecutors,
+        s"initial executor number $initialNumExecutors must between min executor number" +
+          s"$minNumExecutors and max executor number $maxNumExecutors")
+
+      initialNumExecutors
+    } else {
+      val targetNumExecutors =
+        sys.env.get("SPARK_EXECUTOR_INSTANCES").map(_.toInt).getOrElse(DEFAULT_NUMBER_EXECUTORS)
+      // System property can override environment variable.
+      conf.getInt("spark.executor.instances", targetNumExecutors)
+    }
+  }
 }
+

@@ -38,8 +38,7 @@ dlog () {
 
 acquire_sbt_jar () {
   SBT_VERSION=`awk -F "=" '/sbt\.version/ {print $2}' ./project/build.properties`
-  URL1=http://typesafe.artifactoryonline.com/typesafe/ivy-releases/org.scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch.jar
-  URL2=http://repo.typesafe.com/typesafe/ivy-releases/org.scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch.jar
+  URL1=https://dl.bintray.com/typesafe/ivy-releases/org.scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch.jar
   JAR=build/sbt-launch-${SBT_VERSION}.jar
 
   sbt_jar=$JAR
@@ -50,10 +49,12 @@ acquire_sbt_jar () {
     # Download
     printf "Attempting to fetch sbt\n"
     JAR_DL="${JAR}.part"
-    if hash curl 2>/dev/null; then
-      (curl --silent ${URL1} > "${JAR_DL}" || curl --silent ${URL2} > "${JAR_DL}") && mv "${JAR_DL}" "${JAR}"
-    elif hash wget 2>/dev/null; then
-      (wget --quiet ${URL1} -O "${JAR_DL}" || wget --quiet ${URL2} -O "${JAR_DL}") && mv "${JAR_DL}" "${JAR}"
+    if [ $(command -v curl) ]; then
+      curl --fail --location --silent ${URL1} > "${JAR_DL}" &&\
+        mv "${JAR_DL}" "${JAR}"
+    elif [ $(command -v wget) ]; then
+      wget --quiet ${URL1} -O "${JAR_DL}" &&\
+        mv "${JAR_DL}" "${JAR}"
     else
       printf "You do not have curl or wget installed, please install sbt manually from http://www.scala-sbt.org/\n"
       exit -1
@@ -81,7 +82,7 @@ execRunner () {
     echo ""
   }
 
-  exec "$@"
+  "$@"
 }
 
 addJava () {

@@ -42,15 +42,16 @@ import org.apache.spark._
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.deploy.SparkHadoopUtil
-import org.apache.spark.executor.{DataReadMethod, InputMetrics}
+import org.apache.spark.executor.DataReadMethod
 import org.apache.spark.rdd.HadoopRDD.HadoopMapPartitionsWithSplitRDD
-import org.apache.spark.util.{NextIterator, Utils}
+import org.apache.spark.util.{SerializableConfiguration, ShutdownHookManager, NextIterator, Utils}
 import org.apache.spark.scheduler.{HostTaskLocation, HDFSCacheTaskLocation}
+import org.apache.spark.storage.StorageLevel
 
 /**
  * A Spark split class that wraps around a Hadoop InputSplit.
  */
-private[spark] class HadoopPartition(rddId: Int, idx: Int, @transient s: InputSplit)
+private[spark] class HadoopPartition(rddId: Int, idx: Int, s: InputSplit)
   extends Partition {
 
   val inputSplit = new SerializableWritable[InputSplit](s)
@@ -99,13 +100,17 @@ private[spark] class HadoopPartition(rddId: Int, idx: Int, @transient s: InputSp
 @DeveloperApi
 class HadoopRDD[K, V](
     sc: SparkContext,
-    broadcastedConf: Broadcast[SerializableWritable[Configuration]],
+    broadcastedConf: Broadcast[SerializableConfiguration],
     initLocalJobConfFuncOpt: Option[JobConf => Unit],
     inputFormatClass: Class[_ <: InputFormat[K, V]],
     keyClass: Class[K],
     valueClass: Class[V],
     minPartitions: Int)
   extends RDD[(K, V)](sc, Nil) with Logging {
+
+  if (initLocalJobConfFuncOpt.isDefined) {
+    sparkContext.clean(initLocalJobConfFuncOpt.get)
+  }
 
   def this(
       sc: SparkContext,
@@ -116,8 +121,8 @@ class HadoopRDD[K, V](
       minPartitions: Int) = {
     this(
       sc,
-      sc.broadcast(new SerializableWritable(conf))
-        .asInstanceOf[Broadcast[SerializableWritable[Configuration]]],
+      sc.broadcast(new SerializableConfiguration(conf))
+        .asInstanceOf[Broadcast[SerializableConfiguration]],
       None /* initLocalJobConfFuncOpt */,
       inputFormatClass,
       keyClass,
@@ -132,7 +137,7 @@ class HadoopRDD[K, V](
   // used to build JobTracker ID
   private val createTime = new Date()
 
-  private val shouldCloneJobConf = sc.conf.getBoolean("spark.hadoop.cloneConf", false)
+  private val shouldCloneJobConf = sparkContext.conf.getBoolean("spark.hadoop.cloneConf", false)
 
   // Returns a JobConf that will be used on slaves to obtain input splits for Hadoop reads.
   protected def getJobConf(): JobConf = {
@@ -177,17 +182,11 @@ class HadoopRDD[K, V](
   }
 
   protected def getInputFormat(conf: JobConf): InputFormat[K, V] = {
-    if (HadoopRDD.containsCachedMetadata(inputFormatCacheKey)) {
-      return HadoopRDD.getCachedMetadata(inputFormatCacheKey).asInstanceOf[InputFormat[K, V]]
-    }
-    // Once an InputFormat for this RDD is created, cache it so that only one reflection call is
-    // done in each local process.
     val newInputFormat = ReflectionUtils.newInstance(inputFormatClass.asInstanceOf[Class[_]], conf)
       .asInstanceOf[InputFormat[K, V]]
     if (newInputFormat.isInstanceOf[Configurable]) {
       newInputFormat.asInstanceOf[Configurable].setConf(conf)
     }
-    HadoopRDD.putCachedMetadata(inputFormatCacheKey, newInputFormat)
     newInputFormat
   }
 
@@ -214,8 +213,7 @@ class HadoopRDD[K, V](
       logInfo("Input split: " + split.inputSplit)
       val jobConf = getJobConf()
 
-      val inputMetrics = context.taskMetrics
-        .getInputMetricsForReadMethod(DataReadMethod.Hadoop)
+      val inputMetrics = context.taskMetrics.getInputMetricsForReadMethod(DataReadMethod.Hadoop)
 
       // Find a function that will return the FileSystem bytes read by this thread. Do this before
       // creating RecordReader, because RecordReader's constructor might read some bytes
@@ -239,14 +237,16 @@ class HadoopRDD[K, V](
       val key: K = reader.createKey()
       val value: V = reader.createValue()
 
-      override def getNext() = {
+      override def getNext(): (K, V) = {
         try {
           finished = !reader.next(key, value)
         } catch {
           case eof: EOFException =>
             finished = true
         }
-
+        if (!finished) {
+          inputMetrics.incRecordsRead(1)
+        }
         (key, value)
       }
 
@@ -260,7 +260,7 @@ class HadoopRDD[K, V](
             // If we can't get the bytes read from the FS stats, fall back to the split size,
             // which may be inaccurate.
             try {
-              inputMetrics.addBytesRead(split.inputSplit.value.getLength)
+              inputMetrics.incBytesRead(split.inputSplit.value.getLength)
             } catch {
               case e: java.io.IOException =>
                 logWarning("Unable to get input size to set InputMetrics for task", e)
@@ -268,7 +268,7 @@ class HadoopRDD[K, V](
           }
         } catch {
           case e: Exception => {
-            if (!Utils.inShutdown()) {
+            if (!ShutdownHookManager.inShutdown()) {
               logWarning("Exception in RecordReader.close()", e)
             }
           }
@@ -308,6 +308,15 @@ class HadoopRDD[K, V](
     // Do nothing. Hadoop RDD should not be checkpointed.
   }
 
+  override def persist(storageLevel: StorageLevel): this.type = {
+    if (storageLevel.deserialized) {
+      logWarning("Caching NewHadoopRDDs as deserialized objects usually leads to undesired" +
+        " behavior because Hadoop's RecordReader reuses the same Writable object for all records." +
+        " Use a map transformation to make copies of the records.")
+    }
+    super.persist(storageLevel)
+  }
+
   def getConf: Configuration = getJobConf()
 }
 
@@ -325,11 +334,11 @@ private[spark] object HadoopRDD extends Logging {
    * The three methods below are helpers for accessing the local map, a property of the SparkEnv of
    * the local process.
    */
-  def getCachedMetadata(key: String) = SparkEnv.get.hadoopJobMetadata.get(key)
+  def getCachedMetadata(key: String): Any = SparkEnv.get.hadoopJobMetadata.get(key)
 
-  def containsCachedMetadata(key: String) = SparkEnv.get.hadoopJobMetadata.containsKey(key)
+  def containsCachedMetadata(key: String): Boolean = SparkEnv.get.hadoopJobMetadata.containsKey(key)
 
-  def putCachedMetadata(key: String, value: Any) =
+  private def putCachedMetadata(key: String, value: Any): Unit =
     SparkEnv.get.hadoopJobMetadata.put(key, value)
 
   /** Add Hadoop configuration specific to a single partition and attempt. */
@@ -359,7 +368,7 @@ private[spark] object HadoopRDD extends Logging {
 
     override def getPartitions: Array[Partition] = firstParent[T].partitions
 
-    override def compute(split: Partition, context: TaskContext) = {
+    override def compute(split: Partition, context: TaskContext): Iterator[U] = {
       val partition = split.asInstanceOf[HadoopPartition]
       val inputSplit = partition.inputSplit.value
       f(inputSplit, firstParent[T].iterator(split, context))
@@ -368,11 +377,11 @@ private[spark] object HadoopRDD extends Logging {
 
   private[spark] class SplitInfoReflections {
     val inputSplitWithLocationInfo =
-      Class.forName("org.apache.hadoop.mapred.InputSplitWithLocationInfo")
+      Utils.classForName("org.apache.hadoop.mapred.InputSplitWithLocationInfo")
     val getLocationInfo = inputSplitWithLocationInfo.getMethod("getLocationInfo")
-    val newInputSplit = Class.forName("org.apache.hadoop.mapreduce.InputSplit")
+    val newInputSplit = Utils.classForName("org.apache.hadoop.mapreduce.InputSplit")
     val newGetLocationInfo = newInputSplit.getMethod("getLocationInfo")
-    val splitLocationInfo = Class.forName("org.apache.hadoop.mapred.SplitLocationInfo")
+    val splitLocationInfo = Utils.classForName("org.apache.hadoop.mapred.SplitLocationInfo")
     val isInMemory = splitLocationInfo.getMethod("isInMemory")
     val getLocation = splitLocationInfo.getMethod("getLocation")
   }

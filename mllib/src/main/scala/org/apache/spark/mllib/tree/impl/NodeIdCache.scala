@@ -71,15 +71,12 @@ private[tree] case class NodeIndexUpdater(
  * The nodeIdsForInstances RDD needs to be updated at each iteration.
  * @param nodeIdsForInstances The initial values in the cache
  *            (should be an Array of all 1's (meaning the root nodes)).
- * @param checkpointDir The checkpoint directory where
- *                      the checkpointed files will be stored.
  * @param checkpointInterval The checkpointing interval
  *                           (how often should the cache be checkpointed.).
  */
 @DeveloperApi
-private[tree] class NodeIdCache(
+private[spark] class NodeIdCache(
   var nodeIdsForInstances: RDD[Array[Int]],
-  val checkpointDir: Option[String],
   val checkpointInterval: Int) {
 
   // Keep a reference to a previous node Ids for instances.
@@ -90,12 +87,6 @@ private[tree] class NodeIdCache(
   // To keep track of the past checkpointed RDDs.
   private val checkpointQueue = mutable.Queue[RDD[Array[Int]]]()
   private var rddUpdateCount = 0
-
-  // If a checkpoint directory is given, and there's no prior checkpoint directory,
-  // then set the checkpoint directory with the given one.
-  if (checkpointDir.nonEmpty && nodeIdsForInstances.sparkContext.getCheckpointDir.isEmpty) {
-    nodeIdsForInstances.sparkContext.setCheckpointDir(checkpointDir.get)
-  }
 
   /**
    * Update the node index values in the cache.
@@ -117,21 +108,21 @@ private[tree] class NodeIdCache(
 
     prevNodeIdsForInstances = nodeIdsForInstances
     nodeIdsForInstances = data.zip(nodeIdsForInstances).map {
-      dataPoint => {
+      case (point, node) => {
         var treeId = 0
         while (treeId < nodeIdUpdaters.length) {
-          val nodeIdUpdater = nodeIdUpdaters(treeId).getOrElse(dataPoint._2(treeId), null)
+          val nodeIdUpdater = nodeIdUpdaters(treeId).getOrElse(node(treeId), null)
           if (nodeIdUpdater != null) {
             val newNodeIndex = nodeIdUpdater.updateNodeIndex(
-              binnedFeatures = dataPoint._1.datum.binnedFeatures,
+              binnedFeatures = point.datum.binnedFeatures,
               bins = bins)
-            dataPoint._2(treeId) = newNodeIndex
+            node(treeId) = newNodeIndex
           }
 
           treeId += 1
         }
 
-        dataPoint._2
+        node
       }
     }
 
@@ -147,7 +138,7 @@ private[tree] class NodeIdCache(
       while (checkpointQueue.size > 1 && canDelete) {
         // We can delete the oldest checkpoint iff
         // the next checkpoint actually exists in the file system.
-        if (checkpointQueue.get(1).get.getCheckpointFile != None) {
+        if (checkpointQueue.get(1).get.getCheckpointFile.isDefined) {
           val old = checkpointQueue.dequeue()
 
           // Since the old checkpoint is not deleted by Spark,
@@ -168,23 +159,26 @@ private[tree] class NodeIdCache(
    * Call this after training is finished to delete any remaining checkpoints.
    */
   def deleteAllCheckpoints(): Unit = {
-    while (checkpointQueue.size > 0) {
+    while (checkpointQueue.nonEmpty) {
       val old = checkpointQueue.dequeue()
-      if (old.getCheckpointFile != None) {
+      for (checkpointFile <- old.getCheckpointFile) {
         val fs = FileSystem.get(old.sparkContext.hadoopConfiguration)
-        fs.delete(new Path(old.getCheckpointFile.get), true)
+        fs.delete(new Path(checkpointFile), true)
       }
+    }
+    if (prevNodeIdsForInstances != null) {
+      // Unpersist the previous one if one exists.
+      prevNodeIdsForInstances.unpersist()
     }
   }
 }
 
 @DeveloperApi
-private[tree] object NodeIdCache {
+private[spark] object NodeIdCache {
   /**
    * Initialize the node Id cache with initial node Id values.
    * @param data The RDD of training rows.
    * @param numTrees The number of trees that we want to create cache for.
-   * @param checkpointDir The checkpoint directory where the checkpointed files will be stored.
    * @param checkpointInterval The checkpointing interval
    *                           (how often should the cache be checkpointed.).
    * @param initVal The initial values in the cache.
@@ -193,12 +187,10 @@ private[tree] object NodeIdCache {
   def init(
       data: RDD[BaggedPoint[TreePoint]],
       numTrees: Int,
-      checkpointDir: Option[String],
       checkpointInterval: Int,
       initVal: Int = 1): NodeIdCache = {
     new NodeIdCache(
       data.map(_ => Array.fill[Int](numTrees)(initVal)),
-      checkpointDir,
       checkpointInterval)
   }
 }

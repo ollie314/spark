@@ -1,7 +1,7 @@
 ---
 layout: global
-title: Decision Tree - MLlib
-displayTitle: <a href="mllib-guide.html">MLlib</a> - Decision Tree
+title: Decision Trees - MLlib
+displayTitle: <a href="mllib-guide.html">MLlib</a> - Decision Trees
 ---
 
 * Table of contents
@@ -54,8 +54,8 @@ impurity measure for regression (variance).
     <tr>
       <td>Variance</td>
 	  <td>Regression</td>
-     <td>$\frac{1}{N} \sum_{i=1}^{N} (x_i - \mu)^2$</td><td>$y_i$ is label for an instance,
-	  $N$ is the number of instances and $\mu$ is the mean given by $\frac{1}{N} \sum_{i=1}^N x_i$.</td>
+     <td>$\frac{1}{N} \sum_{i=1}^{N} (y_i - \mu)^2$</td><td>$y_i$ is label for an instance,
+	  $N$ is the number of instances and $\mu$ is the mean given by $\frac{1}{N} \sum_{i=1}^N y_i$.</td>
     </tr>
   </tbody>
 </table>
@@ -191,9 +191,12 @@ maximum tree depth of 5. The test error is calculated to measure the algorithm a
 
 <div class="codetabs">
 
-<div data-lang="scala">
+<div data-lang="scala" markdown="1">
+Refer to the [`DecisionTree` Scala docs](api/scala/index.html#org.apache.spark.mllib.tree.DecisionTree) and [`DecisionTreeModel` Scala docs](api/scala/index.html#org.apache.spark.mllib.tree.model.DecisionTreeModel) for details on the API.
+
 {% highlight scala %}
 import org.apache.spark.mllib.tree.DecisionTree
+import org.apache.spark.mllib.tree.model.DecisionTreeModel
 import org.apache.spark.mllib.util.MLUtils
 
 // Load and parse the data file.
@@ -221,10 +224,16 @@ val labelAndPreds = testData.map { point =>
 val testErr = labelAndPreds.filter(r => r._1 != r._2).count.toDouble / testData.count()
 println("Test Error = " + testErr)
 println("Learned classification tree model:\n" + model.toDebugString)
+
+// Save and load model
+model.save(sc, "myModelPath")
+val sameModel = DecisionTreeModel.load(sc, "myModelPath")
 {% endhighlight %}
 </div>
 
-<div data-lang="java">
+<div data-lang="java" markdown="1">
+Refer to the [`DecisionTree` Java docs](api/java/org/apache/spark/mllib/tree/DecisionTree.html) and [`DecisionTreeModel` Java docs](api/java/org/apache/spark/mllib/tree/model/DecisionTreeModel.html) for details on the API.
+
 {% highlight java %}
 import java.util.HashMap;
 import scala.Tuple2;
@@ -279,13 +288,19 @@ Double testErr =
   }).count() / testData.count();
 System.out.println("Test Error: " + testErr);
 System.out.println("Learned classification tree model:\n" + model.toDebugString());
+
+// Save and load model
+model.save(sc.sc(), "myModelPath");
+DecisionTreeModel sameModel = DecisionTreeModel.load(sc.sc(), "myModelPath");
 {% endhighlight %}
 </div>
 
-<div data-lang="python">
+<div data-lang="python" markdown="1">
+Refer to the [`DecisionTree` Python docs](api/python/pyspark.mllib.html#pyspark.mllib.tree.DecisionTree) and [`DecisionTreeModel` Python docs](api/python/pyspark.mllib.html#pyspark.mllib.tree.DecisionTreeModel) for more details on the API.
+
 {% highlight python %}
 from pyspark.mllib.regression import LabeledPoint
-from pyspark.mllib.tree import DecisionTree
+from pyspark.mllib.tree import DecisionTree, DecisionTreeModel
 from pyspark.mllib.util import MLUtils
 
 # Load and parse the data file into an RDD of LabeledPoint.
@@ -305,6 +320,10 @@ testErr = labelsAndPredictions.filter(lambda (v, p): v != p).count() / float(tes
 print('Test Error = ' + str(testErr))
 print('Learned classification tree model:')
 print(model.toDebugString())
+
+# Save and load model
+model.save(sc, "myModelPath")
+sameModel = DecisionTreeModel.load(sc, "myModelPath")
 {% endhighlight %}
 </div>
 
@@ -321,9 +340,12 @@ depth of 5. The Mean Squared Error (MSE) is computed at the end to evaluate
 
 <div class="codetabs">
 
-<div data-lang="scala">
+<div data-lang="scala" markdown="1">
+Refer to the [`DecisionTree` Scala docs](api/scala/index.html#org.apache.spark.mllib.tree.DecisionTree) and [`DecisionTreeModel` Scala docs](api/scala/index.html#org.apache.spark.mllib.tree.model.DecisionTreeModel) for details on the API.
+
 {% highlight scala %}
 import org.apache.spark.mllib.tree.DecisionTree
+import org.apache.spark.mllib.tree.model.DecisionTreeModel
 import org.apache.spark.mllib.util.MLUtils
 
 // Load and parse the data file.
@@ -350,10 +372,16 @@ val labelsAndPredictions = testData.map { point =>
 val testMSE = labelsAndPredictions.map{ case(v, p) => math.pow((v - p), 2)}.mean()
 println("Test Mean Squared Error = " + testMSE)
 println("Learned regression tree model:\n" + model.toDebugString)
+
+// Save and load model
+model.save(sc, "myModelPath")
+val sameModel = DecisionTreeModel.load(sc, "myModelPath")
 {% endhighlight %}
 </div>
 
-<div data-lang="java">
+<div data-lang="java" markdown="1">
+Refer to the [`DecisionTree` Java docs](api/java/org/apache/spark/mllib/tree/DecisionTree.html) and [`DecisionTreeModel` Java docs](api/java/org/apache/spark/mllib/tree/model/DecisionTreeModel.html) for details on the API.
+
 {% highlight java %}
 import java.util.HashMap;
 import scala.Tuple2;
@@ -414,13 +442,19 @@ Double testMSE =
   }) / data.count();
 System.out.println("Test Mean Squared Error: " + testMSE);
 System.out.println("Learned regression tree model:\n" + model.toDebugString());
+
+// Save and load model
+model.save(sc.sc(), "myModelPath");
+DecisionTreeModel sameModel = DecisionTreeModel.load(sc.sc(), "myModelPath");
 {% endhighlight %}
 </div>
 
-<div data-lang="python">
+<div data-lang="python" markdown="1">
+Refer to the [`DecisionTree` Python docs](api/python/pyspark.mllib.html#pyspark.mllib.tree.DecisionTree) and [`DecisionTreeModel` Python docs](api/python/pyspark.mllib.html#pyspark.mllib.tree.DecisionTreeModel) for more details on the API.
+
 {% highlight python %}
 from pyspark.mllib.regression import LabeledPoint
-from pyspark.mllib.tree import DecisionTree
+from pyspark.mllib.tree import DecisionTree, DecisionTreeModel
 from pyspark.mllib.util import MLUtils
 
 # Load and parse the data file into an RDD of LabeledPoint.
@@ -440,6 +474,10 @@ testMSE = labelsAndPredictions.map(lambda (v, p): (v - p) * (v - p)).sum() / flo
 print('Test Mean Squared Error = ' + str(testMSE))
 print('Learned regression tree model:')
 print(model.toDebugString())
+
+# Save and load model
+model.save(sc, "myModelPath")
+sameModel = DecisionTreeModel.load(sc, "myModelPath")
 {% endhighlight %}
 </div>
 
