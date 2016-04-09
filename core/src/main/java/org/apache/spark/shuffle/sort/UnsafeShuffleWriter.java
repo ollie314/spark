@@ -25,7 +25,6 @@ import java.util.Iterator;
 import scala.Option;
 import scala.Product2;
 import scala.collection.JavaConverters;
-import scala.collection.immutable.Map;
 import scala.reflect.ClassTag;
 import scala.reflect.ClassTag$;
 
@@ -41,20 +40,18 @@ import org.apache.spark.annotation.Private;
 import org.apache.spark.executor.ShuffleWriteMetrics;
 import org.apache.spark.io.CompressionCodec;
 import org.apache.spark.io.CompressionCodec$;
-import org.apache.spark.io.LZFCompressionCodec;
+import org.apache.spark.memory.TaskMemoryManager;
 import org.apache.spark.network.util.LimitedInputStream;
 import org.apache.spark.scheduler.MapStatus;
 import org.apache.spark.scheduler.MapStatus$;
 import org.apache.spark.serializer.SerializationStream;
-import org.apache.spark.serializer.Serializer;
 import org.apache.spark.serializer.SerializerInstance;
 import org.apache.spark.shuffle.IndexShuffleBlockResolver;
-import org.apache.spark.shuffle.ShuffleMemoryManager;
 import org.apache.spark.shuffle.ShuffleWriter;
 import org.apache.spark.storage.BlockManager;
 import org.apache.spark.storage.TimeTrackingOutputStream;
 import org.apache.spark.unsafe.Platform;
-import org.apache.spark.unsafe.memory.TaskMemoryManager;
+import org.apache.spark.util.Utils;
 
 @Private
 public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
@@ -69,7 +66,6 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
   private final BlockManager blockManager;
   private final IndexShuffleBlockResolver shuffleBlockResolver;
   private final TaskMemoryManager memoryManager;
-  private final ShuffleMemoryManager shuffleMemoryManager;
   private final SerializerInstance serializer;
   private final Partitioner partitioner;
   private final ShuffleWriteMetrics writeMetrics;
@@ -85,7 +81,7 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
 
   /** Subclass of ByteArrayOutputStream that exposes `buf` directly. */
   private static final class MyByteArrayOutputStream extends ByteArrayOutputStream {
-    public MyByteArrayOutputStream(int size) { super(size); }
+    MyByteArrayOutputStream(int size) { super(size); }
     public byte[] getBuf() { return buf; }
   }
 
@@ -103,7 +99,6 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
       BlockManager blockManager,
       IndexShuffleBlockResolver shuffleBlockResolver,
       TaskMemoryManager memoryManager,
-      ShuffleMemoryManager shuffleMemoryManager,
       SerializedShuffleHandle<K, V> handle,
       int mapId,
       TaskContext taskContext,
@@ -112,29 +107,22 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
     if (numPartitions > SortShuffleManager.MAX_SHUFFLE_OUTPUT_PARTITIONS_FOR_SERIALIZED_MODE()) {
       throw new IllegalArgumentException(
         "UnsafeShuffleWriter can only be used for shuffles with at most " +
-          SortShuffleManager.MAX_SHUFFLE_OUTPUT_PARTITIONS_FOR_SERIALIZED_MODE() + " reduce partitions");
+        SortShuffleManager.MAX_SHUFFLE_OUTPUT_PARTITIONS_FOR_SERIALIZED_MODE() +
+        " reduce partitions");
     }
     this.blockManager = blockManager;
     this.shuffleBlockResolver = shuffleBlockResolver;
     this.memoryManager = memoryManager;
-    this.shuffleMemoryManager = shuffleMemoryManager;
     this.mapId = mapId;
     final ShuffleDependency<K, V, V> dep = handle.dependency();
     this.shuffleId = dep.shuffleId();
-    this.serializer = Serializer.getSerializer(dep.serializer()).newInstance();
+    this.serializer = dep.serializer().newInstance();
     this.partitioner = dep.partitioner();
-    this.writeMetrics = new ShuffleWriteMetrics();
-    taskContext.taskMetrics().shuffleWriteMetrics_$eq(Option.apply(writeMetrics));
+    this.writeMetrics = taskContext.taskMetrics().registerShuffleWriteMetrics();
     this.taskContext = taskContext;
     this.sparkConf = sparkConf;
     this.transferToEnabled = sparkConf.getBoolean("spark.file.transferTo", true);
     open();
-  }
-
-  @VisibleForTesting
-  public int maxRecordSizeBytes() {
-    assert(sorter != null);
-    return sorter.maxRecordSizeBytes;
   }
 
   private void updatePeakMemoryUsed() {
@@ -197,7 +185,6 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
     assert (sorter == null);
     sorter = new ShuffleExternalSorter(
       memoryManager,
-      shuffleMemoryManager,
       blockManager,
       taskContext,
       INITIAL_SORT_BUFFER_SIZE,
@@ -217,8 +204,10 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
     final SpillInfo[] spills = sorter.closeAndGetSpills();
     sorter = null;
     final long[] partitionLengths;
+    final File output = shuffleBlockResolver.getDataFile(shuffleId, mapId);
+    final File tmp = Utils.tempFileWith(output);
     try {
-      partitionLengths = mergeSpills(spills);
+      partitionLengths = mergeSpills(spills, tmp);
     } finally {
       for (SpillInfo spill : spills) {
         if (spill.file.exists() && ! spill.file.delete()) {
@@ -226,7 +215,7 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
         }
       }
     }
-    shuffleBlockResolver.writeIndexFile(shuffleId, mapId, partitionLengths);
+    shuffleBlockResolver.writeIndexFileAndCommit(shuffleId, mapId, partitionLengths, tmp);
     mapStatus = MapStatus$.MODULE$.apply(blockManager.shuffleServerId(), partitionLengths);
   }
 
@@ -259,14 +248,13 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
    *
    * @return the partition lengths in the merged file.
    */
-  private long[] mergeSpills(SpillInfo[] spills) throws IOException {
-    final File outputFile = shuffleBlockResolver.getDataFile(shuffleId, mapId);
+  private long[] mergeSpills(SpillInfo[] spills, File outputFile) throws IOException {
     final boolean compressionEnabled = sparkConf.getBoolean("spark.shuffle.compress", true);
     final CompressionCodec compressionCodec = CompressionCodec$.MODULE$.createCodec(sparkConf);
     final boolean fastMergeEnabled =
       sparkConf.getBoolean("spark.shuffle.unsafe.fastMergeEnabled", true);
-    final boolean fastMergeIsSupported =
-      !compressionEnabled || compressionCodec instanceof LZFCompressionCodec;
+    final boolean fastMergeIsSupported = !compressionEnabled ||
+      CompressionCodec$.MODULE$.supportsConcatenationOfSerializedStreams(compressionCodec);
     try {
       if (spills.length == 0) {
         new FileOutputStream(outputFile).close(); // Create an empty file
@@ -308,8 +296,8 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
         // final write as bytes spilled (instead, it's accounted as shuffle write). The merge needs
         // to be counted as shuffle write, but this will lead to double-counting of the final
         // SpillInfo's bytes.
-        writeMetrics.decShuffleBytesWritten(spills[spills.length - 1].file.length());
-        writeMetrics.incShuffleBytesWritten(outputFile.length());
+        writeMetrics.decBytesWritten(spills[spills.length - 1].file.length());
+        writeMetrics.incBytesWritten(outputFile.length());
         return partitionLengths;
       }
     } catch (IOException e) {
@@ -421,7 +409,7 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
             spillInputChannelPositions[i] += actualBytesTransferred;
             bytesToTransfer -= actualBytesTransferred;
           }
-          writeMetrics.incShuffleWriteTime(System.nanoTime() - writeStartTime);
+          writeMetrics.incWriteTime(System.nanoTime() - writeStartTime);
           bytesWrittenToMergedFile += partitionLengthInSpill;
           partitionLengths[partition] += partitionLengthInSpill;
         }
@@ -455,13 +443,7 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
   @Override
   public Option<MapStatus> stop(boolean success) {
     try {
-      // Update task metrics from accumulators (null in UnsafeShuffleWriterSuite)
-      Map<String, Accumulator<Object>> internalAccumulators =
-        taskContext.internalMetricsToAccumulators();
-      if (internalAccumulators != null) {
-        internalAccumulators.apply(InternalAccumulator.PEAK_EXECUTION_MEMORY())
-          .add(getPeakMemoryUsedBytes());
-      }
+      taskContext.taskMetrics().incPeakExecutionMemory(getPeakMemoryUsedBytes());
 
       if (stopping) {
         return Option.apply(null);

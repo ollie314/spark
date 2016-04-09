@@ -23,23 +23,21 @@ import org.json4s._
 import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
 
-import org.apache.spark.annotation.{Experimental, Since}
+import org.apache.spark.annotation.Since
 import org.apache.spark.mllib.linalg.{DenseVector, SparseVector, Vector, Vectors}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.stat.Statistics
 import org.apache.spark.mllib.util.{Loader, Saveable}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.{SQLContext, Row}
+import org.apache.spark.sql.{Row, SQLContext}
 
 /**
- * :: Experimental ::
  * Chi Squared selector model.
  *
  * @param selectedFeatures list of indices to select (filter). Must be ordered asc
  */
 @Since("1.3.0")
-@Experimental
 class ChiSqSelectorModel @Since("1.3.0") (
   @Since("1.3.0") val selectedFeatures: Array[Int]) extends VectorTransformer with Saveable {
 
@@ -136,7 +134,7 @@ object ChiSqSelectorModel extends Loader[ChiSqSelectorModel] {
     val thisClassName = "org.apache.spark.mllib.feature.ChiSqSelectorModel"
 
     def save(sc: SparkContext, model: ChiSqSelectorModel, path: String): Unit = {
-      val sqlContext = new SQLContext(sc)
+      val sqlContext = SQLContext.getOrCreate(sc)
       import sqlContext.implicits._
       val metadata = compact(render(
         ("class" -> thisClassName) ~ ("version" -> thisFormatVersion)))
@@ -152,7 +150,7 @@ object ChiSqSelectorModel extends Loader[ChiSqSelectorModel] {
 
     def load(sc: SparkContext, path: String): ChiSqSelectorModel = {
       implicit val formats = DefaultFormats
-      val sqlContext = new SQLContext(sc)
+      val sqlContext = SQLContext.getOrCreate(sc)
       val (className, formatVersion, metadata) = Loader.loadMetadata(sc, path)
       assert(className == thisClassName)
       assert(formatVersion == thisFormatVersion)
@@ -163,7 +161,7 @@ object ChiSqSelectorModel extends Loader[ChiSqSelectorModel] {
       // Check schema explicitly since erasure makes it hard to use match-case for checking.
       Loader.checkSchema[Data](dataFrame.schema)
 
-      val features = dataArray.map {
+      val features = dataArray.rdd.map {
         case Row(feature: Int) => (feature)
       }.collect()
 
@@ -173,7 +171,6 @@ object ChiSqSelectorModel extends Loader[ChiSqSelectorModel] {
 }
 
 /**
- * :: Experimental ::
  * Creates a ChiSquared feature selector.
  * @param numTopFeatures number of features that selector will select
  *                       (ordered by statistic value descending)
@@ -181,7 +178,6 @@ object ChiSqSelectorModel extends Loader[ChiSqSelectorModel] {
  *                       select all features.
  */
 @Since("1.3.0")
-@Experimental
 class ChiSqSelector @Since("1.3.0") (
   @Since("1.3.0") val numTopFeatures: Int) extends Serializable {
 
