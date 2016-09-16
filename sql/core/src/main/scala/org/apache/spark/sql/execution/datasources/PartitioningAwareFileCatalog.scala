@@ -126,7 +126,7 @@ abstract class PartitioningAwareFileCatalog(
         PartitioningUtils.parsePartitions(
           leafDirs,
           PartitioningUtils.DEFAULT_PARTITION_NAME,
-          typeInference = sparkSession.sessionState.conf.partitionColumnTypeInferenceEnabled(),
+          typeInference = sparkSession.sessionState.conf.partitionColumnTypeInferenceEnabled,
           basePaths = basePaths)
     }
   }
@@ -204,6 +204,6 @@ abstract class PartitioningAwareFileCatalog(
 
   private def isDataPath(path: Path): Boolean = {
     val name = path.getName
-    !(name.startsWith("_") || name.startsWith("."))
+    !((name.startsWith("_") && !name.contains("=")) || name.startsWith("."))
   }
 }

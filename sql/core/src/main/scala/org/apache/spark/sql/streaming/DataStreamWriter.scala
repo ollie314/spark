@@ -109,7 +109,7 @@ final class DataStreamWriter[T] private[sql](ds: Dataset[T]) {
 
   /**
    * :: Experimental ::
-   * Specifies the name of the [[StreamingQuery]] that can be started with `startStream()`.
+   * Specifies the name of the [[StreamingQuery]] that can be started with `start()`.
    * This name must be unique among all the currently active queries in the associated SQLContext.
    *
    * @since 2.0.0
@@ -122,7 +122,7 @@ final class DataStreamWriter[T] private[sql](ds: Dataset[T]) {
 
   /**
    * :: Experimental ::
-   * Specifies the underlying output data source. Built-in options include "parquet", "json", etc.
+   * Specifies the underlying output data source. Built-in options include "parquet" for now.
    *
    * @since 2.0.0
    */

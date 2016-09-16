@@ -44,9 +44,9 @@ object BuildCommons {
   ).map(ProjectRef(buildLocation, _))
 
   val streamingProjects@Seq(
-    streaming, streamingFlumeSink, streamingFlume, streamingKafka
+    streaming, streamingFlumeSink, streamingFlume, streamingKafka, streamingKafka010
   ) = Seq(
-    "streaming", "streaming-flume-sink", "streaming-flume", "streaming-kafka-0-8"
+    "streaming", "streaming-flume-sink", "streaming-flume", "streaming-kafka-0-8", "streaming-kafka-0-10"
   ).map(ProjectRef(buildLocation, _))
 
   val allProjects@Seq(
@@ -56,13 +56,13 @@ object BuildCommons {
     "tags", "sketch"
   ).map(ProjectRef(buildLocation, _)) ++ sqlProjects ++ streamingProjects
 
-  val optionallyEnabledProjects@Seq(yarn, java8Tests, sparkGangliaLgpl,
+  val optionallyEnabledProjects@Seq(mesos, yarn, java8Tests, sparkGangliaLgpl,
     streamingKinesisAsl, dockerIntegrationTests) =
-    Seq("yarn", "java8-tests", "ganglia-lgpl", "streaming-kinesis-asl",
+    Seq("mesos", "yarn", "java8-tests", "ganglia-lgpl", "streaming-kinesis-asl",
       "docker-integration-tests").map(ProjectRef(buildLocation, _))
 
-  val assemblyProjects@Seq(networkYarn, streamingFlumeAssembly, streamingKafkaAssembly, streamingKinesisAslAssembly) =
-    Seq("network-yarn", "streaming-flume-assembly", "streaming-kafka-0-8-assembly", "streaming-kinesis-asl-assembly")
+  val assemblyProjects@Seq(networkYarn, streamingFlumeAssembly, streamingKafkaAssembly, streamingKafka010Assembly, streamingKinesisAslAssembly) =
+    Seq("network-yarn", "streaming-flume-assembly", "streaming-kafka-0-8-assembly", "streaming-kafka-0-10-assembly", "streaming-kinesis-asl-assembly")
       .map(ProjectRef(buildLocation, _))
 
   val copyJarsProjects@Seq(assembly, examples) = Seq("assembly", "examples")
@@ -212,9 +212,10 @@ object SparkBuild extends PomBuild {
     cachedFun(findFiles(scalaSource.in(config).value))
   }
 
-  private def findFiles(file: File): Set[File] = file.isDirectory match {
-    case true => file.listFiles().toSet.flatMap(findFiles) + file
-    case false => Set(file)
+  private def findFiles(file: File): Set[File] = if (file.isDirectory) {
+    file.listFiles().toSet.flatMap(findFiles) + file
+  } else {
+    Set(file)
   }
 
   def enableScalaStyle: Seq[sbt.Def.Setting[_]] = Seq(
@@ -352,7 +353,7 @@ object SparkBuild extends PomBuild {
   val mimaProjects = allProjects.filterNot { x =>
     Seq(
       spark, hive, hiveThriftServer, catalyst, repl, networkCommon, networkShuffle, networkYarn,
-      unsafe, tags, sketch, mllibLocal
+      unsafe, tags
     ).contains(x)
   }
 
@@ -608,7 +609,7 @@ object Assembly {
         .getOrElse(SbtPomKeys.effectivePom.value.getProperties.get("hadoop.version").asInstanceOf[String])
     },
     jarName in assembly <<= (version, moduleName, hadoopVersion) map { (v, mName, hv) =>
-      if (mName.contains("streaming-flume-assembly") || mName.contains("streaming-kafka-0-8-assembly") || mName.contains("streaming-kinesis-asl-assembly")) {
+      if (mName.contains("streaming-flume-assembly") || mName.contains("streaming-kafka-0-8-assembly") || mName.contains("streaming-kafka-0-10-assembly") || mName.contains("streaming-kinesis-asl-assembly")) {
         // This must match the same name used in maven (see external/kafka-0-8-assembly/pom.xml)
         s"${mName}-${v}.jar"
       } else {
@@ -701,15 +702,29 @@ object Unidoc {
       .map(_.filterNot(_.getCanonicalPath.contains("org/apache/spark/sql/hive/test")))
   }
 
+  private def ignoreClasspaths(classpaths: Seq[Classpath]): Seq[Classpath] = {
+    classpaths
+      .map(_.filterNot(_.data.getCanonicalPath.matches(""".*kafka-clients-0\.10.*""")))
+      .map(_.filterNot(_.data.getCanonicalPath.matches(""".*kafka_2\..*-0\.10.*""")))
+  }
+
   val unidocSourceBase = settingKey[String]("Base URL of source links in Scaladoc.")
 
   lazy val settings = scalaJavaUnidocSettings ++ Seq (
     publish := {},
 
     unidocProjectFilter in(ScalaUnidoc, unidoc) :=
-      inAnyProject -- inProjects(OldDeps.project, repl, examples, tools, streamingFlumeSink, yarn, tags),
+      inAnyProject -- inProjects(OldDeps.project, repl, examples, tools, streamingFlumeSink, yarn, tags, streamingKafka010),
     unidocProjectFilter in(JavaUnidoc, unidoc) :=
-      inAnyProject -- inProjects(OldDeps.project, repl, examples, tools, streamingFlumeSink, yarn, tags),
+      inAnyProject -- inProjects(OldDeps.project, repl, examples, tools, streamingFlumeSink, yarn, tags, streamingKafka010),
+
+    unidocAllClasspaths in (ScalaUnidoc, unidoc) := {
+      ignoreClasspaths((unidocAllClasspaths in (ScalaUnidoc, unidoc)).value)
+    },
+
+    unidocAllClasspaths in (JavaUnidoc, unidoc) := {
+      ignoreClasspaths((unidocAllClasspaths in (JavaUnidoc, unidoc)).value)
+    },
 
     // Skip actual catalyst, but include the subproject.
     // Catalyst is not public API and contains quasiquotes which break scaladoc.
@@ -723,8 +738,7 @@ object Unidoc {
         .map(_.filterNot(_.getCanonicalPath.contains("org/apache/hadoop")))
     },
 
-    // Javadoc options: create a window title, and group key packages on index page
-    javacOptions in doc := Seq(
+    javacOptions in (JavaUnidoc, unidoc) := Seq(
       "-windowtitle", "Spark " + version.value.replaceAll("-SNAPSHOT", "") + " JavaDoc",
       "-public",
       "-noqualifier", "java.lang"
@@ -812,6 +826,7 @@ object TestSettings {
     javaOptions in Test += "-Dspark.testing=1",
     javaOptions in Test += "-Dspark.port.maxRetries=100",
     javaOptions in Test += "-Dspark.master.rest.enabled=false",
+    javaOptions in Test += "-Dspark.memory.debugFill=true",
     javaOptions in Test += "-Dspark.ui.enabled=false",
     javaOptions in Test += "-Dspark.ui.showConsoleProgress=false",
     javaOptions in Test += "-Dspark.unsafe.exceptionOnMemoryLeak=true",

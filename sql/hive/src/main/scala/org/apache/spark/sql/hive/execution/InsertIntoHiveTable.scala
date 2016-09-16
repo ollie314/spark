@@ -51,7 +51,7 @@ case class InsertIntoHiveTable(
     ifNotExists: Boolean) extends UnaryExecNode {
 
   @transient private val sessionState = sqlContext.sessionState.asInstanceOf[HiveSessionState]
-  @transient private val client = sessionState.metadataHive
+  @transient private val externalCatalog = sqlContext.sharedState.externalCatalog
 
   def output: Seq[Attribute] = Seq.empty
 
@@ -223,81 +223,69 @@ case class InsertIntoHiveTable(
         jobConf,
         fileSinkConf,
         dynamicPartColNames,
-        child.output,
-        table)
+        child.output)
     } else {
       new SparkHiveWriterContainer(
         jobConf,
         fileSinkConf,
-        child.output,
-        table)
+        child.output)
     }
 
     @transient val outputClass = writerContainer.newSerializer(table.tableDesc).getSerializedClass
     saveAsHiveFile(child.execute(), outputClass, fileSinkConf, jobConfSer, writerContainer)
 
     val outputPath = FileOutputFormat.getOutputPath(jobConf)
-    // Have to construct the format of dbname.tablename.
-    val qualifiedTableName = s"${table.databaseName}.${table.tableName}"
     // TODO: Correctly set holdDDLTime.
     // In most of the time, we should have holdDDLTime = false.
     // holdDDLTime will be true when TOK_HOLD_DDLTIME presents in the query as a hint.
     val holdDDLTime = false
     if (partition.nonEmpty) {
-
-      // loadPartition call orders directories created on the iteration order of the this map
-      val orderedPartitionSpec = new util.LinkedHashMap[String, String]()
-      table.hiveQlTable.getPartCols.asScala.foreach { entry =>
-        orderedPartitionSpec.put(entry.getName, partitionSpec.getOrElse(entry.getName, ""))
-      }
-
-      // inheritTableSpecs is set to true. It should be set to false for an IMPORT query
-      // which is currently considered as a Hive native command.
-      val inheritTableSpecs = true
-      // TODO: Correctly set isSkewedStoreAsSubdir.
-      val isSkewedStoreAsSubdir = false
       if (numDynamicPartitions > 0) {
-        client.synchronized {
-          client.loadDynamicPartitions(
-            outputPath.toString,
-            qualifiedTableName,
-            orderedPartitionSpec,
-            overwrite,
-            numDynamicPartitions,
-            holdDDLTime,
-            isSkewedStoreAsSubdir)
-        }
+        externalCatalog.loadDynamicPartitions(
+          db = table.catalogTable.database,
+          table = table.catalogTable.identifier.table,
+          outputPath.toString,
+          partitionSpec,
+          overwrite,
+          numDynamicPartitions,
+          holdDDLTime = holdDDLTime)
       } else {
         // scalastyle:off
         // ifNotExists is only valid with static partition, refer to
         // https://cwiki.apache.org/confluence/display/Hive/LanguageManual+DML#LanguageManualDML-InsertingdataintoHiveTablesfromqueries
         // scalastyle:on
         val oldPart =
-          client.getPartitionOption(
-            client.getTable(table.databaseName, table.tableName),
+          externalCatalog.getPartitionOption(
+            table.catalogTable.database,
+            table.catalogTable.identifier.table,
             partitionSpec)
 
         if (oldPart.isEmpty || !ifNotExists) {
-            client.loadPartition(
-              outputPath.toString,
-              qualifiedTableName,
-              orderedPartitionSpec,
-              overwrite,
-              holdDDLTime,
-              inheritTableSpecs,
-              isSkewedStoreAsSubdir)
+          // inheritTableSpecs is set to true. It should be set to false for an IMPORT query
+          // which is currently considered as a Hive native command.
+          val inheritTableSpecs = true
+          externalCatalog.loadPartition(
+            table.catalogTable.database,
+            table.catalogTable.identifier.table,
+            outputPath.toString,
+            partitionSpec,
+            isOverwrite = overwrite,
+            holdDDLTime = holdDDLTime,
+            inheritTableSpecs = inheritTableSpecs)
         }
       }
     } else {
-      client.loadTable(
+      externalCatalog.loadTable(
+        table.catalogTable.database,
+        table.catalogTable.identifier.table,
         outputPath.toString, // TODO: URI
-        qualifiedTableName,
         overwrite,
         holdDDLTime)
     }
 
     // Invalidate the cache.
     sqlContext.sharedState.cacheManager.invalidateCache(table)
+    sqlContext.sessionState.catalog.refreshTable(table.catalogTable.identifier)
 
     // It would be nice to just return the childRdd unchanged so insert operations could be chained,
     // however for now we return an empty list to simplify compatibility checks with hive, which

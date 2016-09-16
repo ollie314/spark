@@ -103,9 +103,10 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product {
    * Find the first [[TreeNode]] that satisfies the condition specified by `f`.
    * The condition is recursively applied to this node and all of its children (pre-order).
    */
-  def find(f: BaseType => Boolean): Option[BaseType] = f(this) match {
-    case true => Some(this)
-    case false => children.foldLeft(Option.empty[BaseType]) { (l, r) => l.orElse(r.find(f)) }
+  def find(f: BaseType => Boolean): Option[BaseType] = if (f(this)) {
+    Some(this)
+  } else {
+    children.foldLeft(Option.empty[BaseType]) { (l, r) => l.orElse(r.find(f)) }
   }
 
   /**
@@ -315,25 +316,9 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product {
   protected def transformChildren(
       rule: PartialFunction[BaseType, BaseType],
       nextOperation: (BaseType, PartialFunction[BaseType, BaseType]) => BaseType): BaseType = {
-    var changed = false
-    val newArgs = mapProductIterator {
-      case arg: TreeNode[_] if containsChild(arg) =>
-        val newChild = nextOperation(arg.asInstanceOf[BaseType], rule)
-        if (!(newChild fastEquals arg)) {
-          changed = true
-          newChild
-        } else {
-          arg
-        }
-      case Some(arg: TreeNode[_]) if containsChild(arg) =>
-        val newChild = nextOperation(arg.asInstanceOf[BaseType], rule)
-        if (!(newChild fastEquals arg)) {
-          changed = true
-          Some(newChild)
-        } else {
-          Some(arg)
-        }
-      case m: Map[_, _] => m.mapValues {
+    if (children.nonEmpty) {
+      var changed = false
+      val newArgs = mapProductIterator {
         case arg: TreeNode[_] if containsChild(arg) =>
           val newChild = nextOperation(arg.asInstanceOf[BaseType], rule)
           if (!(newChild fastEquals arg)) {
@@ -342,33 +327,53 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product {
           } else {
             arg
           }
-        case other => other
-      }.view.force // `mapValues` is lazy and we need to force it to materialize
-      case d: DataType => d // Avoid unpacking Structs
-      case args: Traversable[_] => args.map {
-        case arg: TreeNode[_] if containsChild(arg) =>
+        case Some(arg: TreeNode[_]) if containsChild(arg) =>
           val newChild = nextOperation(arg.asInstanceOf[BaseType], rule)
           if (!(newChild fastEquals arg)) {
             changed = true
-            newChild
+            Some(newChild)
           } else {
-            arg
+            Some(arg)
           }
-        case tuple @ (arg1: TreeNode[_], arg2: TreeNode[_]) =>
-          val newChild1 = nextOperation(arg1.asInstanceOf[BaseType], rule)
-          val newChild2 = nextOperation(arg2.asInstanceOf[BaseType], rule)
-          if (!(newChild1 fastEquals arg1) || !(newChild2 fastEquals arg2)) {
-            changed = true
-            (newChild1, newChild2)
-          } else {
-            tuple
-          }
-        case other => other
+        case m: Map[_, _] => m.mapValues {
+          case arg: TreeNode[_] if containsChild(arg) =>
+            val newChild = nextOperation(arg.asInstanceOf[BaseType], rule)
+            if (!(newChild fastEquals arg)) {
+              changed = true
+              newChild
+            } else {
+              arg
+            }
+          case other => other
+        }.view.force // `mapValues` is lazy and we need to force it to materialize
+        case d: DataType => d // Avoid unpacking Structs
+        case args: Traversable[_] => args.map {
+          case arg: TreeNode[_] if containsChild(arg) =>
+            val newChild = nextOperation(arg.asInstanceOf[BaseType], rule)
+            if (!(newChild fastEquals arg)) {
+              changed = true
+              newChild
+            } else {
+              arg
+            }
+          case tuple@(arg1: TreeNode[_], arg2: TreeNode[_]) =>
+            val newChild1 = nextOperation(arg1.asInstanceOf[BaseType], rule)
+            val newChild2 = nextOperation(arg2.asInstanceOf[BaseType], rule)
+            if (!(newChild1 fastEquals arg1) || !(newChild2 fastEquals arg2)) {
+              changed = true
+              (newChild1, newChild2)
+            } else {
+              tuple
+            }
+          case other => other
+        }
+        case nonChild: AnyRef => nonChild
+        case null => null
       }
-      case nonChild: AnyRef => nonChild
-      case null => null
+      if (changed) makeCopy(newArgs) else this
+    } else {
+      this
     }
-    if (changed) makeCopy(newArgs) else this
   }
 
   /**
@@ -534,9 +539,9 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product {
 
     if (innerChildren.nonEmpty) {
       innerChildren.init.foreach(_.generateTreeString(
-        depth + 2, lastChildren :+ false :+ false, builder, verbose))
+        depth + 2, lastChildren :+ children.isEmpty :+ false, builder, verbose))
       innerChildren.last.generateTreeString(
-        depth + 2, lastChildren :+ false :+ true, builder, verbose)
+        depth + 2, lastChildren :+ children.isEmpty :+ true, builder, verbose)
     }
 
     if (children.nonEmpty) {
@@ -613,7 +618,9 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product {
     case s: String => JString(s)
     case u: UUID => JString(u.toString)
     case dt: DataType => dt.jsonValue
-    case m: Metadata => m.jsonValue
+    // SPARK-17356: In usage of mllib, Metadata may store a huge vector of data, transforming
+    // it to JSON may trigger OutOfMemoryError.
+    case m: Metadata => Metadata.empty.jsonValue
     case s: StorageLevel =>
       ("useDisk" -> s.useDisk) ~ ("useMemory" -> s.useMemory) ~ ("useOffHeap" -> s.useOffHeap) ~
         ("deserialized" -> s.deserialized) ~ ("replication" -> s.replication)
