@@ -15,26 +15,35 @@
  * limitations under the License.
  */
 
-package org.apache.spark.ml.feature
+package org.apache.spark.sql.catalyst.expressions;
 
-import scala.beans.BeanInfo
-
-import org.apache.spark.annotation.{Experimental, Since}
-import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.unsafe.Platform;
 
 /**
- * :: Experimental ::
- *
- * Class that represents the features and label of a data point.
- *
- * @param label Label for this data point.
- * @param features List of features for this data point.
+ * Simulates Hive's hashing function at
+ * org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorUtils#hashcode()
  */
-@Since("2.0.0")
-@Experimental
-@BeanInfo
-case class LabeledPoint(@Since("2.0.0") label: Double, @Since("2.0.0") features: Vector) {
-  override def toString: String = {
-    s"($label,$features)"
+public class HiveHasher {
+
+  @Override
+  public String toString() {
+    return HiveHasher.class.getSimpleName();
+  }
+
+  public static int hashInt(int input) {
+    return input;
+  }
+
+  public static int hashLong(long input) {
+    return (int) ((input >>> 32) ^ input);
+  }
+
+  public static int hashUnsafeBytes(Object base, long offset, int lengthInBytes) {
+    assert (lengthInBytes >= 0): "lengthInBytes cannot be negative";
+    int result = 0;
+    for (int i = 0; i < lengthInBytes; i++) {
+      result = (result * 31) + (int) Platform.getByte(base, offset + i);
+    }
+    return result;
   }
 }
