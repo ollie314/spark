@@ -29,6 +29,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjectio
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 
+
 /**
  * Used to read and write data stored in files to/from the [[InternalRow]] format.
  */
@@ -173,40 +174,4 @@ abstract class TextBasedFileFormat extends FileFormat {
     val codec = codecFactory.getCodec(path)
     codec == null || codec.isInstanceOf[SplittableCompressionCodec]
   }
-}
-
-/**
- * A collection of data files from a partitioned relation, along with the partition values in the
- * form of an [[InternalRow]].
- */
-case class Partition(values: InternalRow, files: Seq[FileStatus])
-
-/**
- * An interface for objects capable of enumerating the files that comprise a relation as well
- * as the partitioning characteristics of those files.
- */
-trait FileCatalog {
-
-  /** Returns the list of input paths from which the catalog will get files. */
-  def paths: Seq[Path]
-
-  /** Returns the specification of the partitions inferred from the data. */
-  def partitionSpec(): PartitionSpec
-
-  /**
-   * Returns all valid files grouped into partitions when the data is partitioned. If the data is
-   * unpartitioned, this will return a single partition with no partition values.
-   *
-   * @param filters The filters used to prune which partitions are returned.  These filters must
-   *                only refer to partition columns and this method will only return files
-   *                where these predicates are guaranteed to evaluate to `true`.  Thus, these
-   *                filters will not need to be evaluated again on the returned data.
-   */
-  def listFiles(filters: Seq[Expression]): Seq[Partition]
-
-  /** Returns all the valid files. */
-  def allFiles(): Seq[FileStatus]
-
-  /** Refresh the file listing */
-  def refresh(): Unit
 }

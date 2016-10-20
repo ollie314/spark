@@ -15,20 +15,16 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.execution.datasources
+package test.org.apache.spark.sql;
 
-import org.apache.spark.SparkFunSuite
+import org.apache.spark.sql.api.java.UDF1;
 
-class ListingFileCatalogSuite extends SparkFunSuite {
-
-  test("file filtering") {
-    assert(!ListingFileCatalog.shouldFilterOut("abcd"))
-    assert(ListingFileCatalog.shouldFilterOut(".ab"))
-    assert(ListingFileCatalog.shouldFilterOut("_cd"))
-
-    assert(!ListingFileCatalog.shouldFilterOut("_metadata"))
-    assert(!ListingFileCatalog.shouldFilterOut("_common_metadata"))
-    assert(ListingFileCatalog.shouldFilterOut("_ab_metadata"))
-    assert(ListingFileCatalog.shouldFilterOut("_cd_common_metadata"))
+/**
+ * It is used for register Java UDF from PySpark
+ */
+public class JavaStringLength implements UDF1<String, Integer> {
+  @Override
+  public Integer call(String str) throws Exception {
+    return new Integer(str.length());
   }
 }
